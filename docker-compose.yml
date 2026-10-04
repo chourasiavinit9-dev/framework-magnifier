@@ -1,0 +1,18 @@
+# Docker Compose for Framework Magnifier
+
+version: "3.9"
+
+services:
+  magnifier:
+    build: .
+    image: framework-magnifier:latest
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - MAGNIFIER_MODEL=${MAGNIFIER_MODEL:-gemma-4}
+    # Give psutil access to the host process list
+    pid: host
+    # Network access needed for port scanning
+    network_mode: host
+    # Pass CLI args via: docker compose run magnifier --ports
+    stdin_open: true
+    tty: true

@@ -2,8 +2,11 @@
 import sys
 import os
 import subprocess
+import warnings
 import psutil
-import google.generativeai as genai
+
+# Suppress deprecation and library warnings for clean terminal CLI UX
+warnings.filterwarnings("ignore")
 
 # Configuration
 _PIP = 'pip' if os.name == 'nt' else 'pip3'
@@ -29,8 +32,11 @@ def get_gemini_model():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         print("Error: GEMINI_API_KEY environment variable is not set.", file=sys.stderr)
+        print("Tip: Get a free key at https://aistudio.google.com and run:", file=sys.stderr)
+        print("  export GEMINI_API_KEY=\"your_api_key_here\"", file=sys.stderr)
         sys.exit(1)
         
+    import google.generativeai as genai
     genai.configure(api_key=api_key)
     model_name = os.environ.get("MAGNIFIER_MODEL", "gemma-4")
     return genai.GenerativeModel(model_name)
@@ -70,23 +76,38 @@ def list_processes(sort_by_memory=False):
         name = p['name']
         print(f"{pid:>8} | {cpu:>6} | {mem:>11} | {user:<12} | {name}")
 
+def _get_listening_ports():
+    """Retrieve listening ports safely across all platforms (handles macOS non-root permissions)."""
+    ports_map = {}
+    try:
+        for conn in psutil.net_connections(kind='inet'):
+            if conn.status == 'LISTEN' and conn.laddr:
+                p = conn.laddr.port
+                if p not in ports_map:
+                    ports_map[p] = (conn.pid, conn.status)
+        return ports_map
+    except (psutil.AccessDenied, PermissionError):
+        pass
+
+    for p in psutil.process_iter(['pid', 'name']):
+        try:
+            for c in p.net_connections(kind='inet'):
+                if c.status == 'LISTEN' and c.laddr:
+                    port = c.laddr.port
+                    if port not in ports_map:
+                        ports_map[port] = (p.info['pid'], c.status)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, PermissionError):
+            continue
+    return ports_map
+
 def list_ports():
     header = f"{'Port':>6} | {'PID':>8} | {'State':<12} | {'Process Name'}"
     print(header)
     print("-" * len(header))
     
-    seen_ports = set()
-    for conn in psutil.net_connections(kind='inet'):
-        if conn.status != 'LISTEN' or not conn.laddr:
-            continue
-            
-        port = conn.laddr.port
-        if port in seen_ports:
-            continue
-        seen_ports.add(port)
-            
-        pid = conn.pid
-        state = conn.status
+    ports_map = _get_listening_ports()
+    for port in sorted(ports_map.keys()):
+        pid, state = ports_map[port]
         try:
             name = psutil.Process(pid).name() if pid else "Unknown"
         except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -112,17 +133,12 @@ def analyze_pid(pid: int):
         print(f"Error: Access denied to read process {pid}.", file=sys.stderr)
 
 def analyze_port(port: int):
-    target_conn = None
-    for conn in psutil.net_connections(kind='inet'):
-        if conn.laddr and conn.laddr.port == port and conn.status == 'LISTEN':
-            target_conn = conn
-            break
-            
-    if not target_conn:
+    ports_map = _get_listening_ports()
+    if port not in ports_map:
         print(f"No listening process found on port {port}.", file=sys.stderr)
         return
         
-    pid = target_conn.pid
+    pid, _ = ports_map[port]
     try:
         info = psutil.Process(pid).as_dict(attrs=['name', 'cmdline', 'exe']) if pid else {}
         prompt = (f"A process is listening on network port {port}.\n"
@@ -172,6 +188,18 @@ def check_dependencies():
         print("No supported dependency files found in the current directory.", file=sys.stderr)
         return
         
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("\n--- Local Manifest Inspection ---")
+        for fn in files_content:
+            print(f"[{fn}]:")
+            for line in files_content[fn].strip().splitlines()[:10]:
+                print(f"  {line}")
+        print("\n[AI Root-Cause Diagnosis]:")
+        print("Tip: To enable Gemma-4 AI root-cause analysis, set your free API key:")
+        print("  export GEMINI_API_KEY=\"your_key_here\" (https://aistudio.google.com)")
+        return
+
     prompt = (f"Analyze these dependency files:\n{files_content}\n\n"
               f"Compare them against the installed packages/environment:\n{installed}\n\n"
               f"Diagnose which version dependency is not installed, and diagnose if any version is unsuitable or incompatible for the project. Provide clear OS-agnostic commands to fix it.")
